@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Chatbot - Final Project</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
+<script src="https://unpkg.com/mammoth@1.7.0/mammoth.browser.min.js"></script>
+<style>
+:root{--bg:#f5f7fb;--card:#ffffff;--text:#212529;--chat-bg:#ffffff;--ai-bg:#f8f9fa;--border:#dee2e6}
+[data-theme="dark"]{--bg:#121212;--card:#1e1e1e;--text:#e0e0e0;--chat-bg:#1e1e1e;--ai-bg:#2d2d2d;--border:#333}
+body{background:var(--bg);color:var(--text);transition:.3s}
+.card,.chat-box{background:var(--card);border-color:var(--border)!important;color:var(--text)}
+.chat-box{height:58vh;overflow-y:auto;border-radius:16px;border:1px solid var(--border)}
+.user-msg{background:#0d6efd;color:white;border-radius:18px 18px 0 18px;max-width:80%;margin-left:auto}
+.ai-msg{background:var(--ai-bg);border-radius:18px 18px 18px 0;max-width:90%;border:1px solid var(--border);color:var(--text)}
+.upload-area{border:2px dashed #0d6efd;border-radius:12px;cursor:pointer;background:rgba(13,110,253,.05);transition:.2s}
+.upload-area:hover{background:rgba(13,110,253,.1)}
+.active-doc{border:2px solid #0d6efd!important;background:rgba(13,110,253,.15)!important;font-weight:bold}
+</style>
+</head>
+<body>
+<div class="container py-3">
+<!-- Header -->
+<div class="d-flex justify-content-between align-items-center mb-3">
+<h5 class="mb-0"><i class="bi bi-robot"></i> RAG Chatbot - Per Document</h5>
+<div class="d-flex gap-2">
+<button class="btn btn-sm btn-outline-secondary" onclick="clearChat()"><i class="bi bi-trash"></i> Clear Chat</button>
+<button class="btn btn-sm btn-outline-dark" onclick="toggleTheme()" id="themeBtn"><i class="bi bi-moon"></i> Dark</button>
+</div>
+</div>
+
+<!-- Upload Card -->
+<div class="card p-3 mb-2 shadow-sm">
+<div class="upload-area p-3 text-center" onclick="document.getElementById('f').click()">
+<b><i class="bi bi-cloud-upload fs-4"></i><br>Click to Upload Documents</b><br>
+<small>Supported: PDF, DOCX, TXT, CSV - You can upload new files without restarting</small>
+<input type="file" id="f" hidden multiple accept=".pdf,.docx,.txt,.csv">
+</div>
+<div id="docSelector" class="mt-3"></div>
+<div id="fl" class="mt-2"></div>
+<div class="row mt-2 g-2">
+<div class="col-md-8"><input type="password" id="k" class="form-control form-control-sm" placeholder="Optional: Gemini API Key AIza... (works without key)"></div>
+<div class="col-md-4"><span class="badge bg-info w-100 p-2" id="stats">No documents</span></div>
+</div>
+</div>
+
+<!-- Chat Box -->
+<div id="cb" class="chat-box p-3 mb-2 shadow-sm">
+<div class="ai-msg p-3">
+<b>👋 Welcome - All Features Included:</b><br>
+• Responsive Bootstrap Interface<br>
+• Multiple documents support (per-document isolation)<br>
+• Chat history during session<br>
+• Source display for each answer<br>
+• Dark/Light mode, Clear chat, Loading indicator<br>
+• Upload new document without restarting<br><br>
+<b>Upload → Select ACTIVE file → Ask → Answer ONLY from that file</b>
+</div>
+</div>
+
+<!-- Input -->
+<div class="input-group shadow-sm">
+<input id="q" class="form-control" placeholder='Ask about active file, e.g. "summarize second file"' onkeypress="if(event.key==='Enter')ask()">
+<button class="btn btn-primary" id="b" onclick="ask()"><i class="bi bi-send"></i> Send</button>
+</div>
+<div id="ld" class="text-center d-none mt-2"><div class="spinner-border spinner-border-sm text-primary"></div> <small>Generating response from selected document...</small></div>
+<div id="err" class="alert alert-danger d-none mt-2 py-2"></div>
+</div>
+
+<script>
+// --- Core Logic - Per Document Isolation (YOUR CODE KEPT) ---
+let VS=[], FILES=[], ACTIVE_IDX=0;
+function emb(t){const w=t.toLowerCase().split(/\W+/).filter(x=>x.length>2);const f={};w.forEach(x=>f[x]=(f[x]||0)+1);return f;}
+function sim(a,b){let d=0,ma=0,mb=0;const k=new Set([...Object.keys(a),...Object.keys(b)]);k.forEach(x=>{const va=a[x]||0,vb=b[x]||0;d+=va*vb;ma+=va*va;mb+=vb*vb});return d/(Math.sqrt(ma)*Math.sqrt(mb)||1);}
+function chunk(t,s=600){const c=[];for(let i=0;i<t.length;i+=s)c.push(t.slice(i,i+s));return c;}
+async function rPDF(f){const b=await f.arrayBuffer();const pdf=await pdfjsLib.getDocument(b).promise;let txt='';for(let i=1;i<=pdf.numPages;i++){const p=await pdf.getPage(i);const co=await p.getTextContent();txt+=co.items.map(it=>it.str).join(' ')+'\n';}return txt;}
+async function rDocx(f){const b=await f.arrayBuffer();const r=await mammoth.extractRawText({arrayBuffer:b});return r.value;}
+
+// UI Helpers
+function showError(msg){const e=document.getElementById('err');e.textContent=msg;e.classList.remove('d-none');setTimeout(()=>e.classList.add('d-none'),4000);}
+function updateStats(){document.getElementById('stats').textContent=FILES.length?`${FILES.length} file(s), ${VS.length} chunks - Active: ${FILES[ACTIVE_IDX]||''}`:'No documents';}
+function renderDocSelector(){
+  const sel=document.getElementById('docSelector'); if(!FILES.length){sel.innerHTML='';return;}
+  let html=`<small class="fw-bold">Select active document (answers ONLY from this):</small><div class="d-flex flex-wrap gap-2 mt-2">`;
+  html+=`<button class="btn btn-sm ${ACTIVE_IDX===-1?'btn-danger':'btn-outline-danger'}" onclick="setActive(-1)"><i class="bi bi-collection"></i> All Docs (${FILES.length})</button>`;
+  FILES.forEach((name,i)=>{
+    html+=`<button class="btn btn-sm ${ACTIVE_IDX===i?'btn-primary active-doc':'btn-outline-secondary'}" onclick="setActive(${i})"><i class="bi bi-file-earmark"></i> ${i+1}: ${name.substring(0,22)} ${ACTIVE_IDX===i?'(ACTIVE)':''}</button>`;
+  });
+  html+=`</div>`;
+  sel.innerHTML=html;
+}
+function setActive(idx){ACTIVE_IDX=idx; renderDocSelector(); updateStats(); add(`✅ Now searching ONLY in: <b>${idx===-1?'All Documents':FILES[idx]}</b><br><small class="text-muted">Source will be displayed with each answer</small>`,'ai');}
+function add(html,sender,isError=false){
+  const box=document.getElementById('cb');
+  const d=document.createElement('div');
+  d.className=sender==='user'?'user-msg p-3 mb-2 shadow-sm':'ai-msg p-3 mb-2 shadow-sm';
+  if(isError)d.classList.add('border','border-danger');
+  const time=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  d.innerHTML=html+`<div class="mt-1"><small class="opacity-75">${time} - ${sender==='user'?'You':'AI'}</small></div>`;
+  box.appendChild(d); box.scrollTop=box.scrollHeight;
+}
+function toggleTheme(){
+  const cur=document.documentElement.getAttribute('data-theme');
+  const next=cur==='dark'?'light':'dark';
+  document.documentElement.setAttribute('data-theme',next);
+  document.getElementById('themeBtn').innerHTML=next==='dark'?'<i class="bi bi-sun"></i> Light':'<i class="bi bi-moon"></i> Dark';
+  localStorage.setItem('theme',next);
+}
+function clearChat(){
+  document.getElementById('cb').innerHTML='<div class="ai-msg p-3"><b>Chat cleared.</b> Conversation history reset. Documents still loaded. Active: <b>'+(FILES[ACTIVE_IDX]||'None')+'</b></div>';
+}
+
+// Upload - Allow new without restart
+document.getElementById('f').addEventListener('change',async e=>{
+  const files=[...e.target.files]; 
+  if(!files.length){showError('No file selected');return;}
+  const allowed=['pdf','docx','txt','csv'];
+  for(let f of files){let ext=f.name.split('.').pop().toLowerCase(); if(!allowed.includes(ext)){showError(`Unsupported file: ${f.name}. Allowed: PDF,DOCX,TXT,CSV`);return;}}
+  add(`📤 Uploading ${files.length} file(s)... You can continue chatting, no restart needed.`,'user');
+  for(const file of files){try{
+    let text='';const ext=file.name.split('.').pop().toLowerCase();
+    if(ext==='pdf')text=await rPDF(file); else if(ext==='docx')text=await rDocx(file); else text=await file.text();
+    if(!text.trim()){showError(`File ${file.name} is empty`);continue;}
+    const fileIdx=FILES.length; const chunks=chunk(text).map(t=>({text:t,embedding:emb(t),source:file.name,fileIdx:fileIdx}));
+    VS.push(...chunks); FILES.push(file.name); ACTIVE_IDX=fileIdx;
+  }catch(err){showError(`Error reading ${file.name}: ${err.message}`); add(`❌ ${file.name}: ${err.message}`,'ai',true);}}
+  document.getElementById('fl').innerHTML=FILES.map((f,i)=>`<span class="badge ${i===ACTIVE_IDX?'bg-success':'bg-primary'} me-1 mb-1">${i+1}: ${f} ${i===ACTIVE_IDX?'← ACTIVE':''}</span>`).join('');
+  renderDocSelector(); updateStats(); add(`✅ Indexed! Active: <b>${FILES[ACTIVE_IDX]}</b> - ${VS.filter(c=>c.fileIdx===ACTIVE_IDX).length} chunks from this file only.`,'ai'); e.target.value='';
+});
+
+function detectTargetDoc(question){
+  const q=question.toLowerCase();
+  if(q.includes('second')||q.includes('file 2')||q.includes('doc 2')||q.includes('2nd')) return FILES.length>=2?1:ACTIVE_IDX;
+  if(q.includes('first')||q.includes('file 1')||q.includes('doc 1')||q.includes('1st')) return 0;
+  if(q.includes('third')||q.includes('file 3')||q.includes('3rd')) return FILES.length>=3?2:ACTIVE_IDX;
+  for(let i=0;i<FILES.length;i++){ if(q.includes(FILES[i].toLowerCase().substring(0,10))) return i; }
+  return ACTIVE_IDX;
+}
+
+async function ask(){
+  const inp=document.getElementById('q'); const qq=inp.value.trim(); 
+  if(!qq){showError('Please enter a question - empty queries not allowed');return;}
+  if(!VS.length){showError('Please upload at least one document first');return;}
+  add(qq,'user'); inp.value=''; 
+  document.getElementById('ld').classList.remove('d-none'); document.getElementById('b').disabled=true; document.getElementById('err').classList.add('d-none');
+  try{
+    let targetIdx=detectTargetDoc(qq);
+    let searchPool=VS; let searchName='All Documents';
+    if(targetIdx!==-1){ searchPool=VS.filter(c=>c.fileIdx===targetIdx); searchName=FILES[targetIdx]; }
+    if(!searchPool.length){add(`⚠️ No content for ${searchName}`,'ai',true);return;}
+    const qEmb=emb(qq); const scored=searchPool.map(c=>({...c,score:sim(qEmb,c.embedding)})).sort((a,b)=>b.score-a.score).slice(0,4);
+    const top=scored[0]?.score||0; const context=scored.map(c=>c.text).join('\n---\n');
+    if(top<0.04){
+      add(`⚠️ <b>This information is not found in ${searchName}.</b><br>You asked: "${qq}"<br>Searched ONLY in: <b>${searchName}</b><br><span class="badge bg-secondary mt-2">Source checked: ${searchName}</span>`,'ai'); return;
+    }
+    const apiKey=document.getElementById('k').value.trim(); let ans='';
+    if(apiKey.startsWith('AIza')){
+      const resp=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:`STRICT RAG: Answer ONLY from context of ${searchName}. If not in context say "This information is not found in ${searchName}."\nContext:\n${context}\nQuestion: ${qq}` }]}]})});
+      const data=await resp.json(); if(data.error)throw new Error(data.error.message); ans=data.candidates[0].content.parts[0].text;
+    } else {
+      const sents=context.split(/[\.\n]+/).filter(s=>s.trim().length>20);
+      const qE=emb(qq); const ranked=sents.map(s=>({text:s.trim(),score:sim(qE,emb(s))})).sort((a,b)=>b.score-a.score).slice(0,3);
+      if(!ranked.length||ranked[0].score<0.03){ ans=`⚠️ <b>Not found in ${searchName}</b>`; }
+      else { ans=`<b>Answer from ${searchName} ONLY:</b><br><br>${ranked.map(r=>`• ${r.text}.`).join('<br><br>')}`; }
+    }
+    add(`${ans}<br><br><span class="badge bg-success"><i class="bi bi-file-earmark-text"></i> Source: ${searchName}</span> <span class="badge bg-light text-dark border">${searchPool.length} chunks searched</span>`,'ai');
+  }catch(err){showError(err.message); add(`❌ Error: ${err.message}`,'ai',true);}finally{document.getElementById('ld').classList.add('d-none');document.getElementById('b').disabled=false;}
+}
+// Init theme
+(function(){const t=localStorage.getItem('theme')||'light';document.documentElement.setAttribute('data-theme',t);document.getElementById('themeBtn').innerHTML=t==='dark'?'<i class="bi bi-sun"></i> Light':'<i class="bi bi-moon"></i> Dark';})();
+</script></body></html>
